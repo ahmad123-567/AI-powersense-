@@ -81,69 +81,360 @@ if page=="🏠 Dashboard":
             st.metric("Reading Difference",f"{diff:g} units")
 
 elif page=="🧾 Bill Analyzer":
-    st.markdown('<div class="ps-header"><div class="ps-title">🧾 Bill Analyzer</div><div class="ps-subtitle">Upload a real bill. PowerSense AI will not substitute demo values.</div></div>',unsafe_allow_html=True)
-    provider_choice=st.selectbox("Electricity Provider / DISCO",DISCOS,index=0)
-    category=st.selectbox("Consumer Category",CONSUMER_CATEGORIES,index=0)
-    language=st.selectbox("Response Language",LANGUAGES,index=0)
-    question=st.text_area("Your question (optional)",placeholder="Why is my bill high? Explain the extra charges.",height=80)
-    uploaded=st.file_uploader("Upload your electricity bill",type=["jpg","jpeg","png","pdf"])
+    st.markdown(
+        '<div class="ps-header">'
+        '<div class="ps-title">🧾 Bill Analyzer</div>'
+        '<div class="ps-subtitle">Upload your electricity bill and PowerSense AI will automatically perform the complete analysis.</div>'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+    provider_choice = st.selectbox(
+        "Electricity Provider / DISCO",
+        DISCOS,
+        index=0
+    )
+
+    category = st.selectbox(
+        "Consumer Category",
+        CONSUMER_CATEGORIES,
+        index=0
+    )
+
+    language = st.selectbox(
+        "Response Language",
+        LANGUAGES,
+        index=0
+    )
+
+    question = st.text_area(
+        "Your question (optional)",
+        placeholder="Why is my bill high? Explain the extra charges.",
+        height=80
+    )
+
+    uploaded = st.file_uploader(
+        "Upload your electricity bill",
+        type=["jpg", "jpeg", "png", "pdf"]
+    )
+
+    # ==========================================================
+    # COMPLETE AUTOMATIC WORKFLOW
+    # Upload itself starts the complete PowerSense AI pipeline
+    # ==========================================================
+
     if uploaded:
-        sig=f"{uploaded.name}:{uploaded.size}"
-        if sig!=st.session_state.signature:
-            st.session_state.signature=sig; st.session_state.analysis=None; st.session_state.complaint=None; st.session_state.context_chunks=[]
-            with st.spinner("Reading the uploaded bill with PDF extraction / OCR..."):
-                text=extract_bill_text(uploaded)
-            st.session_state.bill_text=text
-            if not text or len(text.strip())<15:
-                st.error("PowerSense AI could not confidently read this bill. Please upload a clearer image/PDF. No demo data will be inserted.")
-                st.session_state.bill_data=None
-            elif not api_key:
-                st.warning("The bill text was extracted, but GROQ_API_KEY is required to structure the bill fields.")
-                st.session_state.bill_data=None
-            else:
-                with st.spinner("Bill Extraction Agent is structuring only the values found in your bill..."):
-                    st.session_state.bill_data=extract_bill_fields_with_llm(api_key,text)
+
+        sig = f"{uploaded.name}:{uploaded.size}"
+
+        # Run only when a NEW bill is uploaded
+        if sig != st.session_state.signature:
+
+            st.session_state.signature = sig
+            st.session_state.analysis = None
+            st.session_state.complaint = None
+            st.session_state.context_chunks = []
+            st.session_state.bill_data = None
+            st.session_state.errors = []
+
+            # --------------------------------------------------
+            # STEP 1 — READ BILL
+            # --------------------------------------------------
+            with st.status(
+                "⚡ PowerSense AI is analyzing your bill...",
+                expanded=True
+            ) as status:
+
+                st.write("📄 Reading uploaded bill...")
+
+                text = extract_bill_text(uploaded)
+
+                st.session_state.bill_text = text
+
+                if not text or len(text.strip()) < 15:
+
+                    status.update(
+                        label="❌ Bill could not be read",
+                        state="error",
+                        expanded=True
+                    )
+
+                    st.error(
+                        "PowerSense AI could not confidently read this bill. "
+                        "Please upload a clearer image/PDF. "
+                        "No demo data will be inserted."
+                    )
+
+                    st.session_state.bill_data = None
+
+                elif not api_key:
+
+                    status.update(
+                        label="⚠️ Groq API key required",
+                        state="error",
+                        expanded=True
+                    )
+
+                    st.warning(
+                        "The bill was successfully read, but "
+                        "GROQ_API_KEY is required for AI extraction and analysis."
+                    )
+
+                    st.session_state.bill_data = None
+
+                else:
+
+                    # --------------------------------------------------
+                    # STEP 2 — BILL EXTRACTION AGENT
+                    # --------------------------------------------------
+                    st.write(
+                        "🤖 Bill Extraction Agent is extracting actual bill values..."
+                    )
+
+                    bill_data = extract_bill_fields_with_llm(
+                        api_key,
+                        text
+                    )
+
+                    st.session_state.bill_data = bill_data
+
+                    if not bill_data:
+
+                        status.update(
+                            label="❌ Bill extraction failed",
+                            state="error",
+                            expanded=True
+                        )
+
+                        st.error(
+                            "PowerSense AI could not extract the bill details "
+                            "confidently. Please upload a clearer bill."
+                        )
+
+                    else:
+
+                        # --------------------------------------------------
+                        # STEP 3 — RAG KNOWLEDGE RETRIEVAL
+                        # --------------------------------------------------
+                        st.write(
+                            "📚 RAG Agent is checking official/reference knowledge..."
+                        )
+
+                        query = (
+                            f"{bill_data.get('provider') or provider_choice} "
+                            f"{bill_data.get('tariff_category') or ''} "
+                            f"tariff "
+                            f"units {bill_data.get('units_consumed') or ''} "
+                            f"FCA QTA taxes surcharges "
+                            f"electricity bill verification "
+                            f"{question}"
+                        )
+
+                        try:
+                            vectorstore = build_or_load_vectorstore()
+
+                            chunks = retrieve_relevant_chunks(
+                                query,
+                                vectorstore
+                            )
+
+                            st.session_state.context_chunks = chunks
+
+                        except Exception as e:
+
+                            st.session_state.context_chunks = []
+
+                            st.warning(
+                                f"Knowledge-base retrieval could not be completed: {e}"
+                            )
+
+                        # --------------------------------------------------
+                        # STEP 4 — BILL VERIFICATION + AI ANALYSIS
+                        # --------------------------------------------------
+                        st.write(
+                            "🔍 Verification Agents are checking charges and consumption..."
+                        )
+
+                        resolved_provider = (
+                            bill_data.get("provider")
+                            if provider_choice == "Auto-detect"
+                            else provider_choice
+                        )
+
+                        result = analyze_and_verify_bill(
+                            api_key,
+                            bill_data,
+                            resolved_provider or "Unknown",
+                            category,
+                            language,
+                            st.session_state.context_chunks
+                        )
+
+                        if result:
+
+                            st.session_state.analysis = result
+
+                            # --------------------------------------------------
+                            # STEP 5 — AUTOMATIC COMPLAINT PACKAGE
+                            # --------------------------------------------------
+                            st.write(
+                                "📢 Complaint Assistant is preparing guidance..."
+                            )
+
+                            try:
+
+                                complaint = generate_complaint_package(
+                                    api_key,
+                                    bill_data,
+                                    result,
+                                    resolved_provider or "Unknown",
+                                    language
+                                )
+
+                                st.session_state.complaint = complaint
+
+                            except Exception as e:
+
+                                st.session_state.complaint = None
+
+                                st.warning(
+                                    f"Complaint package could not be generated: {e}"
+                                )
+
+                            status.update(
+                                label="✅ Complete Bill Analysis Finished",
+                                state="complete",
+                                expanded=False
+                            )
+
+                        else:
+
+                            status.update(
+                                label="❌ AI analysis failed",
+                                state="error",
+                                expanded=True
+                            )
+
+                            st.error(
+                                "AI analysis failed. Please check your "
+                                "Groq API key/model availability."
+                            )
+
+        # ----------------------------------------------------------
+        # SHOW UPLOADED BILL
+        # ----------------------------------------------------------
+
         if uploaded.type.startswith("image"):
-            st.image(uploaded,caption="Uploaded bill",use_container_width=True)
+            st.image(
+                uploaded,
+                caption="Uploaded electricity bill",
+                use_container_width=True
+            )
+
+        # ----------------------------------------------------------
+        # SHOW EXTRACTED TEXT
+        # ----------------------------------------------------------
+
         if st.session_state.bill_text:
-            with st.expander("🔎 Extracted bill text"):
-                st.text(st.session_state.bill_text[:8000])
 
-    data=st.session_state.bill_data
-    if data:
-        st.subheader("Review extracted values")
-        editable_fields=["consumer_number","meter_number","provider","billing_month","issue_date","due_date","previous_reading","current_reading","units_consumed","tariff_category","previous_bill_amount","current_bill_amount","amount_payable","electricity_charges","taxes","surcharges","fca","quarterly_adjustment","fixed_charges","arrears","other_charges"]
-        labels={"consumer_number":"Consumer/Reference Number","meter_number":"Meter Number","provider":"Provider/DISCO","billing_month":"Billing Month","issue_date":"Issue Date","due_date":"Due Date","previous_reading":"Previous Reading","current_reading":"Current Reading","units_consumed":"Units Consumed (kWh)","tariff_category":"Tariff Category","previous_bill_amount":"Previous Bill Amount","current_bill_amount":"Current Bill Amount","amount_payable":"Amount Payable","electricity_charges":"Electricity Charges","taxes":"Taxes / GST","surcharges":"Surcharges","fca":"FCA","quarterly_adjustment":"Quarterly Adjustment","fixed_charges":"Fixed Charges","arrears":"Arrears","other_charges":"Other Charges"}
-        cols=st.columns(2); edited=dict(data)
-        numeric_fields={"previous_reading","current_reading","units_consumed","previous_bill_amount","current_bill_amount","amount_payable","electricity_charges","taxes","surcharges","fca","quarterly_adjustment","fixed_charges","arrears","other_charges"}
-        for i,f in enumerate(editable_fields):
-            with cols[i%2]:
-                raw="" if data.get(f) is None else str(data.get(f))
-                edited[f]=st.text_input(labels[f],value=raw,key=f"edit_{f}") or None
-        for f in numeric_fields:
-            if edited.get(f) is not None:
-                try:
-                    cleaned=str(edited[f]).replace(",","").strip()
-                    edited[f]=float(cleaned) if "." in cleaned else int(cleaned)
-                except ValueError:
-                    st.warning(f"{labels[f]} must be a number or left blank.")
-                    edited[f]=None
-        if provider_choice!="Auto-detect": edited["provider"]=provider_choice
-        if st.button("💾 Save Bill Details"):
-            st.session_state.bill_data=edited; st.success("Bill details saved. Only these uploaded-bill values will be analyzed.")
-        if st.button("🚀 Run Full Bill Analysis",type="primary",disabled=not api_key):
-            query=f"{edited.get('provider') or provider_choice} {edited.get('tariff_category') or ''} tariff units {edited.get('units_consumed') or ''} FCA QTA taxes surcharges bill verification {question}"
-            with st.spinner("Retrieving relevant knowledge-base documents with RAG..."):
-                vs=build_or_load_vectorstore(); chunks=retrieve_relevant_chunks(query,vs); st.session_state.context_chunks=chunks
-            with st.spinner("Tariff Analysis and Charge Verification Agents are working..."):
-                resolved=edited.get("provider") if provider_choice=="Auto-detect" else provider_choice
-                result=analyze_and_verify_bill(api_key,edited,resolved or "Unknown",category,language,chunks)
-            if result:
-                st.session_state.analysis=result; st.success("Analysis complete. Open the other pages from the sidebar.")
-            else: st.error("AI analysis failed. Check your Groq API key/model availability and try again.")
-    elif uploaded:
-        st.info("No bill data was populated because the uploaded bill could not be read confidently. This app intentionally does not use demo data.")
+            with st.expander("🔎 View Extracted Bill Text"):
+                st.text(
+                    st.session_state.bill_text[:8000]
+                )
 
+        # ----------------------------------------------------------
+        # SHOW ACTUAL EXTRACTED BILL DATA
+        # ----------------------------------------------------------
+
+        data = st.session_state.bill_data
+
+        if data:
+
+            st.success(
+                "✅ Bill uploaded and processed successfully. "
+                "All results below are based on this uploaded bill."
+            )
+
+            st.subheader("📋 Extracted Bill Information")
+
+            preview_fields = [
+                ("Provider", "provider"),
+                ("Billing Month", "billing_month"),
+                ("Previous Reading", "previous_reading"),
+                ("Current Reading", "current_reading"),
+                ("Units Consumed", "units_consumed"),
+                ("Amount Payable", "amount_payable"),
+                ("Tariff Category", "tariff_category"),
+            ]
+
+            cols = st.columns(4)
+
+            for i, (label, field) in enumerate(preview_fields):
+
+                value = data.get(field)
+
+                if value is None or value == "":
+                    value = "—"
+
+                cols[i % 4].metric(
+                    label,
+                    value
+                )
+
+            # ------------------------------------------------------
+            # AUTOMATIC RESULT SUMMARY
+            # ------------------------------------------------------
+
+            analysis = st.session_state.analysis
+
+            if analysis:
+
+                st.divider()
+
+                st.subheader("⚡ Analysis Complete")
+
+                summary = analysis.get(
+                    "bill_summary",
+                    {}
+                )
+
+                c1, c2, c3, c4 = st.columns(4)
+
+                c1.metric(
+                    "Provider",
+                    summary.get("provider")
+                    or data.get("provider")
+                    or "—"
+                )
+
+                c2.metric(
+                    "Billing Month",
+                    summary.get("billing_month")
+                    or data.get("billing_month")
+                    or "—"
+                )
+
+                c3.metric(
+                    "Units",
+                    summary.get("units_consumed")
+                    if summary.get("units_consumed") is not None
+                    else data.get("units_consumed")
+                    or "—"
+                )
+
+                c4.metric(
+                    "Amount Payable",
+                    summary.get("total_bill")
+                    if summary.get("total_bill") is not None
+                    else data.get("amount_payable")
+                    or "—"
+                )
+
+                st.success(
+                    "🎯 Your complete bill analysis is ready. "
+                    "Use the sidebar to view Bill Breakdown, Attention Items, "
+                    "Why Your Bill Is High, Complaint Assistant and Sources."
+                )
 elif page=="📊 Bill Breakdown":
     st.markdown('<div class="ps-header"><div class="ps-title">📊 Bill Breakdown</div><div class="ps-subtitle">Actual values extracted from your uploaded bill.</div></div>',unsafe_allow_html=True)
     a=st.session_state.analysis
